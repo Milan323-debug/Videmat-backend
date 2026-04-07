@@ -1,141 +1,232 @@
-import { video_basic_info, video_info, stream } from 'play-dl';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
-import ffmpegStatic from 'ffmpeg-static';
+const { execFile, spawn } = require('child_process');
+const path = require('path');
+const fs   = require('fs');
+const os   = require('os');
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
+const IS_WINDOWS    = process.platform === 'win32';
+const YTDLP_BIN     = process.env.YTDLP_PATH || (IS_WINDOWS ? 'yt-dlp.exe' : 'yt-dlp');
 const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
 
-// Auto-create downloads folder if missing
 if (!fs.existsSync(DOWNLOADS_DIR)) {
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
   console.log('📁 Created downloads folder at:', DOWNLOADS_DIR);
 }
 
-// ── Fetch video metadata ─────────────────────────────────
-async function getVideoInfo(url) {
-  try {
-    console.log(`🔍 Fetching info for: ${url}`);
-    
-    const info = await video_basic_info(url);
-    const video = info.video_details;
-    
-    // Get detailed info for formats
-    const detailed = await video_info(url);
-    const formats = detailed.format || [];
-    
-    return parseVideoInfo(video, formats);
-  } catch (err) {
-    console.error('❌ play-dl error:', err.message);
-    
-    if (err.message.includes('unavailable')) throw new Error('VIDEO_UNAVAILABLE');
-    if (err.message.includes('Private')) throw new Error('VIDEO_PRIVATE');
-    if (err.message.includes('copyright')) throw new Error('VIDEO_COPYRIGHT');
-    
-    throw new Error('FETCH_FAILED');
+// ── Cookie setup ─────────────────────────────────────────
+// Writes cookies from env variable to a temp file so yt-dlp can use them
+let COOKIES_PATH = null;
+
+function setupCookies() {
+  // Option A: cookie file already exists on disk (local dev)
+  const localCookies = path.join(__dirname, '../../cookies/youtube.txt');
+  if (fs.existsSync(localCookies)) {
+    COOKIES_PATH = localCookies;
+    console.log('🍪 Using local cookies file');
+    return;
   }
+
+  // Option B: cookies stored as base64 env variable (Render/Railway)
+  const b64 = process.env.YOUTUBE_COOKIES_B64;
+  if (b64) {
+    try {
+      const decoded  = Buffer.from(b64, 'base64').toString('utf-8');
+      const tempPath = path.join(os.tmpdir(), 'yt_cookies.txt');
+      fs.writeFileSync(tempPath, decoded, 'utf-8');
+      COOKIES_PATH = tempPath;
+      console.log('🍪 Cookies loaded from environment variable');
+    } catch (err) {
+      console.warn('⚠️  Failed to decode cookies from env:', err.message);
+    }
+    return;
+  }
+
+  console.warn('⚠️  No YouTube cookies found. Requests may be rate-limited by YouTube.');
 }
 
-// ── Parse play-dl data into clean frontend-friendly object ──
-function parseVideoInfo(video, formats) {
-  const options = buildDownloadOptions(formats, video.lengthSeconds);
+setupCookies();
 
+// ── Helper: build common yt-dlp args ─────────────────────
+function commonArgs() {
+  const args = [
+    '--no-playlist',
+    '--no-warnings',
+    '--no-check-certificate',
+    // Spoof a real browser user-agent
+    '--user-agent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    // Add small delay to look less like a bot
+    '--sleep-requests', '1',
+  ];
+
+  if (COOKIES_PATH) {
+    args.push('--cookies', COOKIES_PATH);
+  }
+
+  return args;
+}
+
+// ── Fetch video metadata ─────────────────────────────────
+function getVideoInfo(url) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '--dump-json',
+      ...commonArgs(),
+      url,
+    ];
+
+    console.log(`🔍 Fetching info for: ${url}`);
+
+    execFile(YTDLP_BIN, args, { timeout: 60000 }, (err, stdout, stderr) => {
+      if (err) {
+        console.error('yt-dlp error:', stderr);
+
+        if (stderr.includes('Video unavailable'))   return reject(new Error('VIDEO_UNAVAILABLE'));
+        if (stderr.includes('Private video'))       return reject(new Error('VIDEO_PRIVATE'));
+        if (stderr.includes('copyright'))           return reject(new Error('VIDEO_COPYRIGHT'));
+        if (stderr.includes('not a valid URL'))     return reject(new Error('INVALID_URL'));
+        if (stderr.includes('429'))                 return reject(new Error('RATE_LIMITED'));
+        if (stderr.includes('Sign in to confirm')) return reject(new Error('RATE_LIMITED'));
+
+        return reject(new Error('FETCH_FAILED'));
+      }
+
+      try {
+        const data = JSON.parse(stdout.trim());
+        resolve(parseVideoInfo(data));
+      } catch (parseErr) {
+        console.error('JSON parse error:', parseErr.message);
+        reject(new Error('PARSE_FAILED'));
+      }
+    });
+  });
+}
+
+// ── Download video/audio to file ────────────────────────
+function downloadToFile(url, format, outputPath, ext, onProgress) {
+  return new Promise((resolve, reject) => {
+    const isAudio = ext === 'mp3';
+
+    const args = [
+      '--format', format,
+      ...commonArgs(),
+      '--newline',
+      '--output', outputPath,
+    ];
+
+    if (isAudio) {
+      args.push(
+        '--extract-audio',
+        '--audio-format', 'mp3',
+        '--audio-quality', '0',
+      );
+    } else {
+      args.push('--merge-output-format', 'mp4');
+    }
+
+    args.push(url);
+
+    console.log(`⬇  Starting download: ${path.basename(outputPath)}`);
+
+    const proc = spawn(YTDLP_BIN, args, { shell: IS_WINDOWS });
+    let lastProgress = -1;
+
+    proc.stdout.on('data', (data) => {
+      const line = data.toString();
+      const match = line.match(/(\d+\.?\d*)%/);
+      if (match) {
+        const pct = parseFloat(match[1]);
+        if (pct !== lastProgress) {
+          lastProgress = pct;
+          onProgress?.(pct);
+        }
+      }
+    });
+
+    proc.stderr.on('data', (data) => {
+      const msg = data.toString();
+      if (msg.includes('ERROR') || msg.includes('429')) {
+        console.error('yt-dlp stderr:', msg.trim());
+      }
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        console.log(`✅ Download complete: ${path.basename(outputPath)}`);
+        resolve(outputPath);
+      } else {
+        reject(new Error(`yt-dlp exited with code ${code}`));
+      }
+    });
+
+    proc.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        reject(new Error(`yt-dlp binary not found. Tried: "${YTDLP_BIN}"`));
+      } else {
+        reject(err);
+      }
+    });
+  });
+}
+
+// ── Parse yt-dlp JSON ────────────────────────────────────
+function parseVideoInfo(raw) {
+  const options = buildDownloadOptions(raw.formats || [], raw.duration || 0);
   return {
-    id:          video.id,
-    title:       video.title || 'Unknown Title',
-    thumbnail:   video.thumbnails?.[video.thumbnails.length - 1]?.url || '',
-    duration:    parseInt(video.lengthSeconds) || 0,
-    uploader:    video.channel?.name || 'Unknown',
-    viewCount:   parseInt(video.viewCount) || 0,
-    likeCount:   0,
-    description: (video.description || '').slice(0, 300),
-    webpage_url: `https://www.youtube.com/watch?v=${video.id}`,
+    id:          raw.id,
+    title:       raw.title        || 'Unknown Title',
+    thumbnail:   raw.thumbnail    || '',
+    duration:    raw.duration     || 0,
+    uploader:    raw.uploader     || 'Unknown',
+    viewCount:   raw.view_count   || 0,
+    likeCount:   raw.like_count   || 0,
+    description: (raw.description || '').slice(0, 300),
+    webpage_url: raw.webpage_url  || '',
     options,
   };
 }
 
-// ── Build user-facing download options ───────────────────
 function buildDownloadOptions(formats, duration) {
-  const options = [];
+  const options  = [];
+  const heights  = [1080, 720, 480, 360, 240, 144];
 
-  // Handle both array of formats and play-dl's format structure
-  const formatArray = Array.isArray(formats) ? formats : (formats?.list || []);
-
-  if (formatArray.length > 0) {
-    // Video options
-    const videoFormats = formatArray.filter(f => f.hasVideo).slice(0, 6);
-    videoFormats.forEach(f => {
-      const height = f.qualityLabel?.match(/\d+/)?.[0] || '360';
-      options.push({
-        id:       `video_${height}p`,
-        label:    parseInt(height) >= 720 ? `${height}p HD` : `${height}p`,
-        type:     'video',
-        quality:  `${height}p`,
-        format:   f.itag,
-        ext:      'mp4',
-        filesize: f.contentLength ? parseInt(f.contentLength) : estimateVideoSize(parseInt(height), duration),
-        icon:     parseInt(height) >= 720 ? '🎬' : '📹',
-      });
+  for (const height of heights) {
+    options.push({
+      id:       `video_${height}p`,
+      label:    height >= 720 ? `${height}p HD` : `${height}p`,
+      type:     'video',
+      quality:  `${height}p`,
+      format:   `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best[height<=${height}]`,
+      ext:      'mp4',
+      filesize: estimateVideoSize(height, duration),
+      icon:     height >= 720 ? '🎬' : '📹',
     });
-
-    // Audio options
-    const audioFormats = formatArray.filter(f => f.hasAudio && !f.hasVideo);
-    if (audioFormats.length > 0) {
-      options.push({
-        id:       'audio_mp3_128',
-        label:    'MP3 — 128 kbps',
-        type:     'audio',
-        quality:  '128kbps',
-        format:   audioFormats[0].itag,
-        ext:      'mp3',
-        filesize: estimateAudioSize(128, duration),
-        icon:     '🎵',
-      });
-
-      options.push({
-        id:       'audio_mp3_320',
-        label:    'MP3 — 320 kbps',
-        type:     'audio',
-        quality:  '320kbps',
-        format:   audioFormats[0].itag,
-        ext:      'mp3',
-        filesize: estimateAudioSize(320, duration),
-        icon:     '🎵',
-      });
-    }
-  } else {
-    // Fallback if no formats available
-    options.push(
-      {
-        id: 'video_720p',
-        label: '720p HD',
-        type: 'video',
-        quality: '720p',
-        format: 'auto',
-        ext: 'mp4',
-        filesize: estimateVideoSize(720, duration),
-        icon: '🎬',
-      },
-      {
-        id: 'audio_mp3_128',
-        label: 'MP3 — 128 kbps',
-        type: 'audio',
-        quality: '128kbps',
-        format: 'auto',
-        ext: 'mp3',
-        filesize: estimateAudioSize(128, duration),
-        icon: '🎵',
-      }
-    );
   }
+
+  options.push({
+    id:       'audio_mp3_128',
+    label:    'MP3 — 128 kbps',
+    type:     'audio',
+    quality:  '128kbps',
+    format:   'bestaudio/best',
+    ext:      'mp3',
+    filesize: estimateAudioSize(128, duration),
+    icon:     '🎵',
+  });
+
+  options.push({
+    id:       'audio_mp3_320',
+    label:    'MP3 — 320 kbps',
+    type:     'audio',
+    quality:  '320kbps',
+    format:   'bestaudio/best',
+    ext:      'mp3',
+    filesize: estimateAudioSize(320, duration),
+    icon:     '🎵',
+  });
 
   return options;
 }
 
-// ── Rough file size estimators ───────────────────────────
 function estimateVideoSize(height, duration) {
   const kbps = { 1080: 4000, 720: 2500, 480: 1200, 360: 700, 240: 400, 144: 200 };
   return Math.round(((kbps[height] || 500) * 1000 / 8) * duration);
@@ -145,82 +236,4 @@ function estimateAudioSize(kbps, duration) {
   return Math.round((kbps * 1000 / 8) * duration);
 }
 
-// ── Download video/audio to a file path, reporting progress ──
-function downloadToFile(url, format, outputPath, ext, onProgress) {
-  return new Promise((resolve, reject) => {
-    try {
-      console.log(`⬇  Starting download: ${outputPath}`);
-      console.log(`   Format: ${format}`);
-
-      stream(url, { quality: parseInt(format) || 18 })
-        .then(s => {
-          const file = fs.createWriteStream(outputPath);
-          
-          let downloadedSize = 0;
-
-          s.on('data', (chunk) => {
-            downloadedSize += chunk.length;
-          });
-
-          s.on('error', (err) => {
-            fs.unlink(outputPath, () => {});
-            reject(new Error(`Stream error: ${err.message}`));
-          });
-
-          file.on('error', (err) => {
-            fs.unlink(outputPath, () => {});
-            reject(new Error(`File write failed: ${err.message}`));
-          });
-
-          s.pipe(file);
-
-          file.on('finish', () => {
-            if (ext === 'mp3') {
-              const mp3Path = outputPath.replace('.mp4', '.mp3');
-              convertToMp3(outputPath, mp3Path)
-                .then(() => {
-                  fs.unlink(outputPath, () => {});
-                  console.log(`✅ Download complete: ${mp3Path}`);
-                  resolve(mp3Path);
-                })
-                .catch((err) => reject(new Error(`MP3 conversion failed: ${err.message}`)));
-            } else {
-              console.log(`✅ Download complete: ${outputPath}`);
-              resolve(outputPath);
-            }
-          });
-        })
-        .catch(err => reject(new Error(`Play-dl stream error: ${err.message}`)));
-    } catch (err) {
-      reject(new Error(`Download error: ${err.message}`));
-    }
-  });
-}
-
-// ── Convert audio to MP3 using ffmpeg ──────────────────────
-function convertToMp3(inputPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn(ffmpegStatic, [
-      '-i', inputPath,
-      '-acodec', 'libmp3lame',
-      '-b:a', '192k',
-      '-y',
-      outputPath
-    ]);
-
-    ffmpeg.on('close', (code) => {
-      if (code === 0) {
-        console.log(`✅ Converted to MP3: ${outputPath}`);
-        resolve(outputPath);
-      } else {
-        reject(new Error(`ffmpeg process exited with code ${code}`));
-      }
-    });
-
-    ffmpeg.on('error', (err) => {
-      reject(new Error(`Failed to start ffmpeg: ${err.message}`));
-    });
-  });
-}
-
-export { getVideoInfo, downloadToFile, DOWNLOADS_DIR };
+module.exports = { getVideoInfo, downloadToFile, DOWNLOADS_DIR };
