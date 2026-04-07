@@ -82,6 +82,7 @@ function commonArgs() {
     '--force-ipv4',
     // ⚠️  AGGRESSIVE RATE LIMITING CONFIG FOR RENDER
     '--sleep-requests', '5',           // Wait 5 seconds between requests
+    '--min-sleep-interval', '2',       // Min 2 seconds between retries
     '--max-sleep-interval', '30',      // Max 30 seconds between retries
     '--socket-timeout', '30',          // 30s socket timeout
     '--retries', '5',                  // Retry up to 5 times
