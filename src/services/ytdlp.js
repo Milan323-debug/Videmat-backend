@@ -20,16 +20,25 @@ async function getVideoInfo(url) {
   try {
     console.log(`🔍 Fetching info for: ${url}`);
     
-    const info = await ytdl.getInfo(url);
+    const info = await ytdl.getInfo(url, {
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      }
+    });
     const videoDetails = info.videoDetails;
     
     return parseVideoInfo(videoDetails, info.formats);
   } catch (err) {
-    console.error('ytdl-core error:', err.message);
+    console.error('❌ ytdl-core error:', err.message);
+    console.error('    Error code:', err.code);
+    console.error('    Full error:', JSON.stringify(err, null, 2));
     
     if (err.message.includes('Video unavailable')) throw new Error('VIDEO_UNAVAILABLE');
     if (err.message.includes('Private')) throw new Error('VIDEO_PRIVATE');
     if (err.message.includes('copyright')) throw new Error('VIDEO_COPYRIGHT');
+    if (err.message.includes('429') || err.message.includes('Too Many Requests')) throw new Error('RATE_LIMITED');
     
     throw new Error('FETCH_FAILED');
   }
