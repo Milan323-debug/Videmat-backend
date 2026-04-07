@@ -1,4 +1,4 @@
-import ytdl from 'ytdl-core';
+import { video_basic_info, video_info, stream } from 'play-dl';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -20,52 +20,39 @@ async function getVideoInfo(url) {
   try {
     console.log(`🔍 Fetching info for: ${url}`);
     
-    const info = await ytdl.getInfo(url, {
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        },
-        timeout: 30000
-      }
-    });
-    const videoDetails = info.videoDetails;
+    const info = await video_basic_info(url);
+    const video = info.video_details;
     
-    console.log(`✅ Successfully fetched: ${videoDetails.title}`);
-    return parseVideoInfo(videoDetails, info.formats);
+    // Get detailed info for formats
+    const detailed = await video_info(url);
+    const formats = detailed.format || [];
+    
+    return parseVideoInfo(video, formats);
   } catch (err) {
-    console.error('❌ ytdl-core error:', err.message);
-    console.error('    Status Code:', err.statusCode || err.code);
+    console.error('❌ play-dl error:', err.message);
     
-    if (err.statusCode === 410 || err.message.includes('410')) {
-      throw new Error('VIDEO_UNAVAILABLE');
-    }
-    if (err.statusCode === 403 || err.message.includes('403')) {
-      throw new Error('ACCESS_DENIED');
-    }
-    if (err.message.includes('Sign in')) throw new Error('SIGNIN_REQUIRED');
-    if (err.message.includes('Video unavailable')) throw new Error('VIDEO_UNAVAILABLE');
+    if (err.message.includes('unavailable')) throw new Error('VIDEO_UNAVAILABLE');
     if (err.message.includes('Private')) throw new Error('VIDEO_PRIVATE');
+    if (err.message.includes('copyright')) throw new Error('VIDEO_COPYRIGHT');
     
     throw new Error('FETCH_FAILED');
   }
 }
 
-// ── Parse raw ytdl-core data into clean frontend-friendly object ──
-function parseVideoInfo(videoDetails, formats) {
-  const options = buildDownloadOptions(formats, videoDetails.lengthSeconds);
+// ── Parse play-dl data into clean frontend-friendly object ──
+function parseVideoInfo(video, formats) {
+  const options = buildDownloadOptions(formats, video.lengthSeconds);
 
   return {
-    id:          videoDetails.videoId,
-    title:       videoDetails.title || 'Unknown Title',
-    thumbnail:   videoDetails.thumbnail?.thumbnails?.[videoDetails.thumbnail.thumbnails.length - 1]?.url || '',
-    duration:    parseInt(videoDetails.lengthSeconds) || 0,
-    uploader:    videoDetails.author?.name || 'Unknown',
-    viewCount:   parseInt(videoDetails.viewCount) || 0,
+    id:          video.id,
+    title:       video.title || 'Unknown Title',
+    thumbnail:   video.thumbnails?.[video.thumbnails.length - 1]?.url || '',
+    duration:    parseInt(video.lengthSeconds) || 0,
+    uploader:    video.channel?.name || 'Unknown',
+    viewCount:   parseInt(video.viewCount) || 0,
     likeCount:   0,
-    description: (videoDetails.shortDescription || '').slice(0, 300),
-    webpage_url: `https://www.youtube.com/watch?v=${videoDetails.videoId}`,
+    description: (video.description || '').slice(0, 300),
+    webpage_url: `https://www.youtube.com/watch?v=${video.id}`,
     options,
   };
 }
@@ -74,60 +61,75 @@ function parseVideoInfo(videoDetails, formats) {
 function buildDownloadOptions(formats, duration) {
   const options = [];
 
-  // Get unique video qualities from available formats
-  const videoFormats = formats.filter(f => f.hasVideo && f.hasAudio && f.mimeType?.includes('mp4'));
-  const audioFormats = formats.filter(f => f.hasAudio && !f.hasVideo && f.mimeType?.includes('audio'));
+  // Handle both array of formats and play-dl's format structure
+  const formatArray = Array.isArray(formats) ? formats : (formats?.list || []);
 
-  // Remove duplicates and sort by quality
-  const qualities = new Map();
-  videoFormats.forEach(f => {
-    const height = f.height || 360;
-    if (!qualities.has(height) || (f.bitrate || 0) > (qualities.get(height).bitrate || 0)) {
-      qualities.set(height, f);
-    }
-  });
-
-  // Add video options (sorted high to low)
-  Array.from(qualities.entries())
-    .sort((a, b) => b[0] - a[0])
-    .slice(0, 6)
-    .forEach(([height, format]) => {
+  if (formatArray.length > 0) {
+    // Video options
+    const videoFormats = formatArray.filter(f => f.hasVideo).slice(0, 6);
+    videoFormats.forEach(f => {
+      const height = f.qualityLabel?.match(/\d+/)?.[0] || '360';
       options.push({
         id:       `video_${height}p`,
-        label:    height >= 720 ? `${height}p HD` : `${height}p`,
+        label:    parseInt(height) >= 720 ? `${height}p HD` : `${height}p`,
         type:     'video',
         quality:  `${height}p`,
-        format:   format.itag,
+        format:   f.itag,
         ext:      'mp4',
-        filesize: format.contentLength ? parseInt(format.contentLength) : estimateVideoSize(height, duration),
-        icon:     height >= 720 ? '🎬' : '📹',
+        filesize: f.contentLength ? parseInt(f.contentLength) : estimateVideoSize(parseInt(height), duration),
+        icon:     parseInt(height) >= 720 ? '🎬' : '📹',
       });
     });
 
-  // Add audio options (use best audio format)
-  const bestAudio = audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-  if (bestAudio) {
-    options.push({
-      id:       'audio_mp3_128',
-      label:    'MP3 — 128 kbps',
-      type:     'audio',
-      quality:  '128kbps',
-      format:   bestAudio.itag,
-      ext:      'mp3',
-      filesize: estimateAudioSize(128, duration),
-      icon:     '🎵',
-    });
+    // Audio options
+    const audioFormats = formatArray.filter(f => f.hasAudio && !f.hasVideo);
+    if (audioFormats.length > 0) {
+      options.push({
+        id:       'audio_mp3_128',
+        label:    'MP3 — 128 kbps',
+        type:     'audio',
+        quality:  '128kbps',
+        format:   audioFormats[0].itag,
+        ext:      'mp3',
+        filesize: estimateAudioSize(128, duration),
+        icon:     '🎵',
+      });
 
-    options.push({
-      id:       'audio_mp3_320',
-      label:    'MP3 — 320 kbps',
-      type:     'audio',
-      quality:  '320kbps',
-      format:   bestAudio.itag,
-      ext:      'mp3',
-      filesize: estimateAudioSize(320, duration),
-      icon:     '🎵',
-    });
+      options.push({
+        id:       'audio_mp3_320',
+        label:    'MP3 — 320 kbps',
+        type:     'audio',
+        quality:  '320kbps',
+        format:   audioFormats[0].itag,
+        ext:      'mp3',
+        filesize: estimateAudioSize(320, duration),
+        icon:     '🎵',
+      });
+    }
+  } else {
+    // Fallback if no formats available
+    options.push(
+      {
+        id: 'video_720p',
+        label: '720p HD',
+        type: 'video',
+        quality: '720p',
+        format: 'auto',
+        ext: 'mp4',
+        filesize: estimateVideoSize(720, duration),
+        icon: '🎬',
+      },
+      {
+        id: 'audio_mp3_128',
+        label: 'MP3 — 128 kbps',
+        type: 'audio',
+        quality: '128kbps',
+        format: 'auto',
+        ext: 'mp3',
+        filesize: estimateAudioSize(128, duration),
+        icon: '🎵',
+      }
+    );
   }
 
   return options;
@@ -150,46 +152,45 @@ function downloadToFile(url, format, outputPath, ext, onProgress) {
       console.log(`⬇  Starting download: ${outputPath}`);
       console.log(`   Format: ${format}`);
 
-      // format should be an itag (number) from buildDownloadOptions
-      const options = { quality: parseInt(format) || 'highest' };
-      const stream = ytdl(url, options);
-      const file = fs.createWriteStream(outputPath);
+      stream(url, { quality: parseInt(format) || 18 })
+        .then(s => {
+          const file = fs.createWriteStream(outputPath);
+          
+          let downloadedSize = 0;
 
-      stream.on('progress', (chunkLength, downloaded, total) => {
-        const percent = (downloaded / total) * 100;
-        onProgress?.(percent);
-      });
+          s.on('data', (chunk) => {
+            downloadedSize += chunk.length;
+          });
 
-      stream.on('error', (err) => {
-        fs.unlink(outputPath, () => {});
-        reject(new Error(`Download failed: ${err.message}`));
-      });
+          s.on('error', (err) => {
+            fs.unlink(outputPath, () => {});
+            reject(new Error(`Stream error: ${err.message}`));
+          });
 
-      file.on('error', (err) => {
-        fs.unlink(outputPath, () => {});
-        reject(new Error(`File write failed: ${err.message}`));
-      });
+          file.on('error', (err) => {
+            fs.unlink(outputPath, () => {});
+            reject(new Error(`File write failed: ${err.message}`));
+          });
 
-      stream.pipe(file);
+          s.pipe(file);
 
-      file.on('finish', () => {
-        if (ext === 'mp3') {
-          // Convert to MP3 using ffmpeg
-          const mp3Path = outputPath.replace('.mp4', '.mp3');
-          convertToMp3(outputPath, mp3Path)
-            .then(() => {
-              fs.unlink(outputPath, () => {}); // Remove original
-              console.log(`✅ Download complete: ${mp3Path}`);
-              resolve(mp3Path);
-            })
-            .catch((err) => {
-              reject(new Error(`MP3 conversion failed: ${err.message}`));
-            });
-        } else {
-          console.log(`✅ Download complete: ${outputPath}`);
-          resolve(outputPath);
-        }
-      });
+          file.on('finish', () => {
+            if (ext === 'mp3') {
+              const mp3Path = outputPath.replace('.mp4', '.mp3');
+              convertToMp3(outputPath, mp3Path)
+                .then(() => {
+                  fs.unlink(outputPath, () => {});
+                  console.log(`✅ Download complete: ${mp3Path}`);
+                  resolve(mp3Path);
+                })
+                .catch((err) => reject(new Error(`MP3 conversion failed: ${err.message}`)));
+            } else {
+              console.log(`✅ Download complete: ${outputPath}`);
+              resolve(outputPath);
+            }
+          });
+        })
+        .catch(err => reject(new Error(`Play-dl stream error: ${err.message}`)));
     } catch (err) {
       reject(new Error(`Download error: ${err.message}`));
     }
