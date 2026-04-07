@@ -84,7 +84,6 @@ function commonArgs() {
     '--sleep-requests', '5',           // Wait 5 seconds between requests
     '--max-sleep-interval', '30',      // Max 30 seconds between retries
     '--socket-timeout', '30',          // 30s socket timeout
-    '--read-timeout', '30',            // 30s read timeout
     '--retries', '5',                  // Retry up to 5 times
     '--fragment-retries', '5',
     '--skip-unavailable-fragments',
