@@ -1,91 +1,91 @@
 import { execFile, spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const IS_WINDOWS    = process.platform === 'win32';
-const PROJECT_ROOT  = path.join(__dirname, '../../');
-const BIN_DIR       = path.join(PROJECT_ROOT, 'bin');
+const IS_WINDOWS   = process.platform === 'win32';
+const PROJECT_ROOT = path.join(__dirname, '../../');
+const BIN_DIR      = path.join(PROJECT_ROOT, 'bin');
 
-// On Windows use yt-dlp.exe from PATH
-// On Linux (Render) use the binary we downloaded into ./bin/
-const YTDLP_BIN  = process.env.YTDLP_PATH  || (IS_WINDOWS ? 'yt-dlp.exe'  : path.join(BIN_DIR, 'yt-dlp'));
-const FFMPEG_BIN = process.env.FFMPEG_PATH || (IS_WINDOWS ? 'ffmpeg'       : path.join(BIN_DIR, 'ffmpeg'));
-const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
+const YTDLP_BIN  = process.env.YTDLP_PATH  || (IS_WINDOWS ? 'yt-dlp.exe' : path.join(BIN_DIR, 'yt-dlp'));
+const FFMPEG_BIN = process.env.FFMPEG_PATH || (IS_WINDOWS ? 'ffmpeg'      : path.join(BIN_DIR, 'ffmpeg'));
 
+const DOWNLOADS_DIR = path.join(PROJECT_ROOT, 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) {
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
   console.log('📁 Created downloads folder at:', DOWNLOADS_DIR);
 }
 
-// ── Cookie setup ─────────────────────────────────────────
-// Writes cookies from env variable to a temp file so yt-dlp can use them
+// ── Cookie Setup ─────────────────────────────────────────
 let COOKIES_PATH = null;
 
 function setupCookies() {
-  // Option A: cookie file already exists on disk (local dev)
-  const localCookies = path.join(__dirname, '../../cookies/youtube.txt');
-  if (fs.existsSync(localCookies)) {
-    COOKIES_PATH = localCookies;
-    console.log('🍪 Using local cookies file');
+  // Option A — local file (for Windows dev machine)
+  const localPath = path.join(PROJECT_ROOT, 'cookies', 'youtube.txt');
+  if (fs.existsSync(localPath)) {
+    COOKIES_PATH = localPath;
+    console.log('🍪 Using local cookie file:', localPath);
     return;
   }
 
-  // Option B: cookies stored as base64 env variable (Render/Railway)
+  // Option B — base64 env variable (Render)
   const b64 = process.env.YOUTUBE_COOKIES_B64;
-  if (b64) {
+  if (b64 && b64.trim() !== '') {
     try {
-      const decoded  = Buffer.from(b64, 'base64').toString('utf-8');
-      const tempPath = path.join(os.tmpdir(), 'yt_cookies.txt');
-      fs.writeFileSync(tempPath, decoded, 'utf-8');
-      COOKIES_PATH = tempPath;
-      console.log('🍪 Cookies loaded from environment variable');
+      const decoded = Buffer.from(b64.trim(), 'base64').toString('utf-8');
+
+      // Write to a stable path inside the project (not /tmp which may get cleared)
+      const cookieDir  = path.join(PROJECT_ROOT, 'cookies');
+      const cookiePath = path.join(cookieDir, 'youtube.txt');
+
+      if (!fs.existsSync(cookieDir)) {
+        fs.mkdirSync(cookieDir, { recursive: true });
+      }
+
+      fs.writeFileSync(cookiePath, decoded, 'utf-8');
+
+      // Verify the file was actually written and has content
+      const written = fs.readFileSync(cookiePath, 'utf-8');
+      if (written.length < 100) {
+        console.warn('⚠️  Cookie file seems too small — may be invalid');
+      }
+
+      COOKIES_PATH = cookiePath;
+      console.log('🍪 Cookie file written to:', cookiePath);
+      console.log('🍪 Cookie file size:', written.length, 'bytes');
+      console.log('🍪 First line:', written.split('\n')[0]);
     } catch (err) {
-      console.warn('⚠️  Failed to decode cookies from env:', err.message);
+      console.error('❌ Failed to write cookie file:', err.message);
     }
     return;
   }
 
-  console.warn('⚠️  No YouTube cookies found. Requests may be rate-limited by YouTube.');
+  console.warn('⚠️  No YouTube cookies found in env or local file!');
 }
 
 setupCookies();
 
-// ── Helper: build common yt-dlp args ─────────────────────
+// ── Common yt-dlp args ───────────────────────────────────
 function commonArgs() {
-  const poToken   = process.env.YOUTUBE_PO_TOKEN || '';
-  const visitorId = process.env.YOUTUBE_VISITOR_ID || '';
-
   const args = [
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
     '--ffmpeg-location', FFMPEG_BIN,
-    // Spoof a real Chrome browser
+    '--extractor-args',  'youtube:player_client=android,web',
     '--user-agent',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    // Add delays to avoid bot detection
-    '--sleep-requests', '2',
-    '--sleep-interval', '2',
-    // Use IPv4 only (IPv6 is more often flagged)
+    'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
     '--force-ipv4',
+    '--sleep-requests', '1',
   ];
 
-  // Add PO token and visitor data to extractor args
-  if (poToken && visitorId) {
-    args.push('--extractor-args', `youtube:po_token=${poToken};visitor_data=${visitorId}`);
-  } else if (poToken) {
-    args.push('--extractor-args', `youtube:po_token=${poToken}`);
-  } else if (visitorId) {
-    args.push('--extractor-args', `youtube:visitor_data=${visitorId}`);
-  }
-
-  // Add cookies if available
-  if (COOKIES_PATH) {
+  if (COOKIES_PATH && fs.existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH);
+    console.log('🍪 Passing cookies to yt-dlp from:', COOKIES_PATH);
+  } else {
+    console.warn('⚠️  Cookie file missing at runtime! Path was:', COOKIES_PATH);
   }
 
   return args;
