@@ -69,17 +69,30 @@ setupCookies();
 
 // ── Common yt-dlp args ───────────────────────────────────
 function commonArgs() {
+  const poToken   = process.env.YOUTUBE_PO_TOKEN || '';
+  const visitorId = process.env.YOUTUBE_VISITOR_ID || '';
+
   const args = [
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
     '--ffmpeg-location', FFMPEG_BIN,
-    '--extractor-args',  'youtube:player_client=android,web',
     '--user-agent',
-    'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     '--force-ipv4',
-    '--sleep-requests', '1',
+    '--sleep-requests', '2',
+    '--sleep-interval', '1',
   ];
+
+  // Add PO token and visitor data if available (helps bypass bot detection)
+  if (poToken || visitorId) {
+    let extractorArgs = 'youtube:';
+    if (poToken) extractorArgs += `po_token=${poToken}`;
+    if (poToken && visitorId) extractorArgs += ';';
+    if (visitorId) extractorArgs += `visitor_data=${visitorId}`;
+    args.push('--extractor-args', extractorArgs);
+    console.log('🔐 Using YouTube auth tokens');
+  }
 
   if (COOKIES_PATH && fs.existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH);
