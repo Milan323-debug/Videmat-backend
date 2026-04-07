@@ -9,8 +9,13 @@ const IS_WINDOWS   = process.platform === 'win32';
 const PROJECT_ROOT = path.join(__dirname, '../../');
 const BIN_DIR      = path.join(PROJECT_ROOT, 'bin');
 
-const YTDLP_BIN  = process.env.YTDLP_PATH  || (IS_WINDOWS ? 'yt-dlp.exe' : path.join(BIN_DIR, 'yt-dlp'));
-const FFMPEG_BIN = process.env.FFMPEG_PATH || (IS_WINDOWS ? 'ffmpeg'      : path.join(BIN_DIR, 'ffmpeg'));
+// Use globally installed yt-dlp/ffmpeg first, fall back to local binaries on Render
+const YTDLP_BIN  = process.env.YTDLP_PATH  || 'yt-dlp';
+const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg';
+
+console.log('🖥️  Platform:', process.platform, '| IS_WINDOWS:', IS_WINDOWS);
+console.log('📁 YTDLP_BIN:', YTDLP_BIN);
+console.log('📁 FFMPEG_BIN:', FFMPEG_BIN);
 
 const DOWNLOADS_DIR = path.join(PROJECT_ROOT, 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) {
@@ -69,9 +74,6 @@ setupCookies();
 
 // ── Common yt-dlp args ───────────────────────────────────
 function commonArgs() {
-  const poToken   = process.env.YOUTUBE_PO_TOKEN || '';
-  const visitorId = process.env.YOUTUBE_VISITOR_ID || '';
-
   const args = [
     '--no-playlist',
     '--no-warnings',
@@ -90,20 +92,6 @@ function commonArgs() {
     '--skip-unavailable-fragments',
     '--prefer-free-formats',           // Lower res/size = faster, less rate limit
   ];
-
-  // Add PO token and visitor data if available (helps bypass bot detection)
-  if (poToken || visitorId) {
-    let extractorArgs = 'youtube:';
-    if (poToken) extractorArgs += `po_token=${poToken}`;
-    if (poToken && visitorId) extractorArgs += ';';
-    if (visitorId) extractorArgs += `visitor_data=${visitorId}`;
-    args.push('--extractor-args', extractorArgs);
-    console.log('🔐 Using YouTube auth tokens');
-  } else {
-    // Use multiple player clients to avoid single IP detection
-    args.push('--extractor-args', 'youtube:player_client=web;html5');
-    console.log('🎮 Using web/html5 player clients');
-  }
 
   if (COOKIES_PATH && fs.existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH);
@@ -149,15 +137,18 @@ function getVideoInfo(url) {
     execFile(YTDLP_BIN, args, { timeout: 60000 }, (err, stdout, stderr) => {
       if (err) {
         console.error('yt-dlp error:', stderr);
+        console.error('yt-dlp error object:', err.message);
+        console.error('yt-dlp command:', YTDLP_BIN);
+        console.error('yt-dlp args:', args);
 
-        if (stderr.includes('Video unavailable'))   return reject(new Error('VIDEO_UNAVAILABLE'));
-        if (stderr.includes('Private video'))       return reject(new Error('VIDEO_PRIVATE'));
-        if (stderr.includes('copyright'))           return reject(new Error('VIDEO_COPYRIGHT'));
-        if (stderr.includes('not a valid URL'))     return reject(new Error('INVALID_URL'));
-        if (stderr.includes('429'))                 return reject(new Error('RATE_LIMITED'));
-        if (stderr.includes('Sign in to confirm')) return reject(new Error('RATE_LIMITED'));
-        if (stderr.includes('rate limit'))          return reject(new Error('RATE_LIMITED'));
-        if (stderr.includes('Please try again'))    return reject(new Error('RATE_LIMITED'));
+        if (stderr && stderr.includes('Video unavailable'))   return reject(new Error('VIDEO_UNAVAILABLE'));
+        if (stderr && stderr.includes('Private video'))       return reject(new Error('VIDEO_PRIVATE'));
+        if (stderr && stderr.includes('copyright'))           return reject(new Error('VIDEO_COPYRIGHT'));
+        if (stderr && stderr.includes('not a valid URL'))     return reject(new Error('INVALID_URL'));
+        if (stderr && stderr.includes('429'))                 return reject(new Error('RATE_LIMITED'));
+        if (stderr && stderr.includes('Sign in to confirm')) return reject(new Error('RATE_LIMITED'));
+        if (stderr && stderr.includes('rate limit'))          return reject(new Error('RATE_LIMITED'));
+        if (stderr && stderr.includes('Please try again'))    return reject(new Error('RATE_LIMITED'));
 
         return reject(new Error('FETCH_FAILED'));
       }
