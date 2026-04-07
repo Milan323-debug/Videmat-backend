@@ -4,10 +4,13 @@ const fs   = require('fs');
 const os   = require('os');
 
 const IS_WINDOWS    = process.platform === 'win32';
+const PROJECT_ROOT  = path.join(__dirname, '../../');
+const BIN_DIR       = path.join(PROJECT_ROOT, 'bin');
 
 // On Windows use yt-dlp.exe from PATH
 // On Linux (Render) use the binary we downloaded into ./bin/
-const YTDLP_BIN     = process.env.YTDLP_PATH || (IS_WINDOWS ? 'yt-dlp.exe' : './bin/yt-dlp');
+const YTDLP_BIN  = process.env.YTDLP_PATH  || (IS_WINDOWS ? 'yt-dlp.exe'  : path.join(BIN_DIR, 'yt-dlp'));
+const FFMPEG_BIN = process.env.FFMPEG_PATH || (IS_WINDOWS ? 'ffmpeg'       : path.join(BIN_DIR, 'ffmpeg'));
 const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
 
 if (!fs.existsSync(DOWNLOADS_DIR)) {
@@ -54,6 +57,7 @@ function commonArgs() {
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
+    '--ffmpeg-location', FFMPEG_BIN,   // ← tell yt-dlp where ffmpeg is
     // Spoof a real browser user-agent
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
