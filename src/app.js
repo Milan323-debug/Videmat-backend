@@ -17,6 +17,21 @@ app.get('/health', (_, res) =>
   res.json({ status: 'ok', platform: process.platform, time: new Date().toISOString() })
 );
 
+app.get('/', (_, res) =>
+  res.json({
+    name: 'VidMate Backend',
+    version: '1.0.0',
+    status: 'running',
+    endpoints: {
+      health: '/health',
+      info: 'POST /api/info',
+      stream: 'POST /api/stream/start',
+      jobs: 'GET /api/stream/jobs/:jobId',
+      history: 'GET /api/history'
+    }
+  })
+);
+
 app.use('/api/info',    infoRouter);
 app.use('/api/stream',  streamRouter);
 app.use('/api/history', historyRouter);  // ← NEW
