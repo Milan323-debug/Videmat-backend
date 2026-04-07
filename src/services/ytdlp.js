@@ -4,7 +4,10 @@ const fs   = require('fs');
 const os   = require('os');
 
 const IS_WINDOWS    = process.platform === 'win32';
-const YTDLP_BIN     = process.env.YTDLP_PATH || (IS_WINDOWS ? 'yt-dlp.exe' : 'yt-dlp');
+
+// On Windows use yt-dlp.exe from PATH
+// On Linux (Render) use the binary we downloaded into ./bin/
+const YTDLP_BIN     = process.env.YTDLP_PATH || (IS_WINDOWS ? 'yt-dlp.exe' : './bin/yt-dlp');
 const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
 
 if (!fs.existsSync(DOWNLOADS_DIR)) {
