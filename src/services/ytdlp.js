@@ -1,7 +1,10 @@
-const { execFile, spawn } = require('child_process');
-const path = require('path');
-const fs   = require('fs');
-const os   = require('os');
+import { execFile, spawn } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const IS_WINDOWS    = process.platform === 'win32';
 const PROJECT_ROOT  = path.join(__dirname, '../../');
@@ -243,4 +246,4 @@ function estimateAudioSize(kbps, duration) {
   return Math.round((kbps * 1000 / 8) * duration);
 }
 
-module.exports = { getVideoInfo, downloadToFile, DOWNLOADS_DIR };
+export { getVideoInfo, downloadToFile, DOWNLOADS_DIR };
