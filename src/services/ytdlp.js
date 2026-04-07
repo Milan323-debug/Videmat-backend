@@ -80,8 +80,15 @@ function commonArgs() {
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     '--force-ipv4',
-    '--sleep-requests', '2',
-    '--sleep-interval', '1',
+    // ⚠️  AGGRESSIVE RATE LIMITING CONFIG FOR RENDER
+    '--sleep-requests', '5',           // Wait 5 seconds between requests
+    '--max-sleep-interval', '30',      // Max 30 seconds between retries
+    '--socket-timeout', '30',          // 30s socket timeout
+    '--read-timeout', '30',            // 30s read timeout
+    '--retries', '5',                  // Retry up to 5 times
+    '--fragment-retries', '5',
+    '--skip-unavailable-fragments',
+    '--prefer-free-formats',           // Lower res/size = faster, less rate limit
   ];
 
   // Add PO token and visitor data if available (helps bypass bot detection)
@@ -92,6 +99,10 @@ function commonArgs() {
     if (visitorId) extractorArgs += `visitor_data=${visitorId}`;
     args.push('--extractor-args', extractorArgs);
     console.log('🔐 Using YouTube auth tokens');
+  } else {
+    // Use multiple player clients to avoid single IP detection
+    args.push('--extractor-args', 'youtube:player_client=web;html5');
+    console.log('🎮 Using web/html5 player clients');
   }
 
   if (COOKIES_PATH && fs.existsSync(COOKIES_PATH)) {
@@ -104,9 +115,29 @@ function commonArgs() {
   return args;
 }
 
+// ── Retry logic with exponential backoff for rate limiting ──
+async function retryWithBackoff(fn, maxRetries = 3, baseDelayMs = 2000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!err.message?.includes('RATE_LIMITED')) throw err;
+      
+      if (attempt === maxRetries) {
+        console.error(`❌ Rate limited after ${maxRetries} attempts`);
+        throw err;
+      }
+
+      const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+      console.warn(`⏳ Rate limited — retrying in ${delayMs / 1000}s (attempt ${attempt}/${maxRetries})`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
+
 // ── Fetch video metadata ─────────────────────────────────
 function getVideoInfo(url) {
-  return new Promise((resolve, reject) => {
+  return retryWithBackoff(() => new Promise((resolve, reject) => {
     const args = [
       '--dump-json',
       ...commonArgs(),
@@ -125,6 +156,8 @@ function getVideoInfo(url) {
         if (stderr.includes('not a valid URL'))     return reject(new Error('INVALID_URL'));
         if (stderr.includes('429'))                 return reject(new Error('RATE_LIMITED'));
         if (stderr.includes('Sign in to confirm')) return reject(new Error('RATE_LIMITED'));
+        if (stderr.includes('rate limit'))          return reject(new Error('RATE_LIMITED'));
+        if (stderr.includes('Please try again'))    return reject(new Error('RATE_LIMITED'));
 
         return reject(new Error('FETCH_FAILED'));
       }
@@ -137,74 +170,83 @@ function getVideoInfo(url) {
         reject(new Error('PARSE_FAILED'));
       }
     });
-  });
+  }));
 }
 
 // ── Download video/audio to file ────────────────────────
 function downloadToFile(url, format, outputPath, ext, onProgress) {
-  return new Promise((resolve, reject) => {
-    const isAudio = ext === 'mp3';
+  return retryWithBackoff(async () => {
+    return new Promise((resolve, reject) => {
+      const isAudio = ext === 'mp3';
 
-    const args = [
-      '--format', format,
-      ...commonArgs(),
-      '--newline',
-      '--output', outputPath,
-    ];
+      const args = [
+        '--format', format,
+        ...commonArgs(),
+        '--newline',
+        '--output', outputPath,
+      ];
 
-    if (isAudio) {
-      args.push(
-        '--extract-audio',
-        '--audio-format', 'mp3',
-        '--audio-quality', '0',
-      );
-    } else {
-      args.push('--merge-output-format', 'mp4');
-    }
+      if (isAudio) {
+        args.push(
+          '--extract-audio',
+          '--audio-format', 'mp3',
+          '--audio-quality', '0',
+        );
+      } else {
+        args.push('--merge-output-format', 'mp4');
+      }
 
-    args.push(url);
+      args.push(url);
 
-    console.log(`⬇  Starting download: ${path.basename(outputPath)}`);
+      console.log(`⬇  Starting download: ${path.basename(outputPath)}`);
 
-    const proc = spawn(YTDLP_BIN, args, { shell: IS_WINDOWS });
-    let lastProgress = -1;
+      const proc = spawn(YTDLP_BIN, args, { shell: IS_WINDOWS });
+      let lastProgress = -1;
+      let errorMsg = '';
 
-    proc.stdout.on('data', (data) => {
-      const line = data.toString();
-      const match = line.match(/(\d+\.?\d*)%/);
-      if (match) {
-        const pct = parseFloat(match[1]);
-        if (pct !== lastProgress) {
-          lastProgress = pct;
-          onProgress?.(pct);
+      proc.stdout.on('data', (data) => {
+        const line = data.toString();
+        const match = line.match(/(\d+\.?\d*)%/);
+        if (match) {
+          const pct = parseFloat(match[1]);
+          if (pct !== lastProgress) {
+            lastProgress = pct;
+            onProgress?.(pct);
+          }
         }
-      }
-    });
+      });
 
-    proc.stderr.on('data', (data) => {
-      const msg = data.toString();
-      if (msg.includes('ERROR') || msg.includes('429')) {
-        console.error('yt-dlp stderr:', msg.trim());
-      }
-    });
+      proc.stderr.on('data', (data) => {
+        const msg = data.toString();
+        errorMsg += msg;
+        if (msg.includes('ERROR') || msg.includes('429')) {
+          console.error('yt-dlp stderr:', msg.trim());
+        }
+      });
 
-    proc.on('close', (code) => {
-      if (code === 0) {
-        console.log(`✅ Download complete: ${path.basename(outputPath)}`);
-        resolve(outputPath);
-      } else {
-        reject(new Error(`yt-dlp exited with code ${code}`));
-      }
-    });
+      proc.on('close', (code) => {
+        if (code === 0) {
+          console.log(`✅ Download complete: ${path.basename(outputPath)}`);
+          resolve(outputPath);
+        } else {
+          // Detect rate limiting
+          if (errorMsg.includes('429') || errorMsg.includes('Please try again') || errorMsg.includes('rate limit')) {
+            reject(new Error('RATE_LIMITED'));
+          } else {
+            reject(new Error(`yt-dlp exited with code ${code}`));
+          }
+        }
+      });
 
-    proc.on('error', (err) => {
-      if (err.code === 'ENOENT') {
-        reject(new Error(`yt-dlp binary not found. Tried: "${YTDLP_BIN}"`));
-      } else {
-        reject(err);
-      }
+      proc.on('error', (err) => {
+        if (err.code === 'ENOENT') {
+          reject(new Error(`yt-dlp binary not found. Tried: "${YTDLP_BIN}"`));
+        } else {
+          reject(err);
+        }
+      });
     });
-  });
+  }, 2, 3000);  // Retry up to 2 times with 3 second base delay for downloads
 }
 
 // ── Parse yt-dlp JSON ────────────────────────────────────
