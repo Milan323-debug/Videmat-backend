@@ -6,6 +6,9 @@ mkdir -p ./bin
 curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
   -o ./bin/yt-dlp
 chmod a+rx ./bin/yt-dlp
+
+echo "=== Updating yt-dlp to absolute latest ==="
+./bin/yt-dlp -U || true
 ./bin/yt-dlp --version
 echo "yt-dlp installed successfully"
 

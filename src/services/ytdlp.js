@@ -56,16 +56,34 @@ setupCookies();
 
 // ── Helper: build common yt-dlp args ─────────────────────
 function commonArgs() {
+  const poToken   = process.env.YOUTUBE_PO_TOKEN || '';
+  const visitorId = process.env.YOUTUBE_VISITOR_ID || '';
+
+  // Build player client arg with PO token and visitor data if available
+  let playerClientArg = 'youtube:player_client=web,default';
+  if (poToken && visitorId) {
+    playerClientArg = `youtube:player_client=web;po_token=${poToken};visitor_data=${visitorId}`;
+  } else if (poToken) {
+    playerClientArg = `youtube:player_client=web;po_token=${poToken}`;
+  } else if (visitorId) {
+    playerClientArg = `youtube:player_client=web;visitor_data=${visitorId}`;
+  }
+
   const args = [
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
-    '--ffmpeg-location', FFMPEG_BIN,   // ← tell yt-dlp where ffmpeg is
-    // Spoof a real browser user-agent
+    '--ffmpeg-location', FFMPEG_BIN,
+    // Force yt-dlp to use the web client (most compatible)
+    '--extractor-args', playerClientArg,
+    // Spoof a real Chrome browser
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    // Add small delay to look less like a bot
-    '--sleep-requests', '1',
+    // Add delays to avoid bot detection
+    '--sleep-requests', '2',
+    '--sleep-interval', '2',
+    // Use IPv4 only (IPv6 is more often flagged)
+    '--force-ipv4',
   ];
 
   if (COOKIES_PATH) {
