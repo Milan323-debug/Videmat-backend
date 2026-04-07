@@ -23,22 +23,30 @@ async function getVideoInfo(url) {
     const info = await ytdl.getInfo(url, {
       requestOptions: {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        timeout: 30000
       }
     });
     const videoDetails = info.videoDetails;
     
+    console.log(`✅ Successfully fetched: ${videoDetails.title}`);
     return parseVideoInfo(videoDetails, info.formats);
   } catch (err) {
     console.error('❌ ytdl-core error:', err.message);
-    console.error('    Error code:', err.code);
-    console.error('    Full error:', JSON.stringify(err, null, 2));
+    console.error('    Status Code:', err.statusCode || err.code);
     
+    if (err.statusCode === 410 || err.message.includes('410')) {
+      throw new Error('VIDEO_UNAVAILABLE');
+    }
+    if (err.statusCode === 403 || err.message.includes('403')) {
+      throw new Error('ACCESS_DENIED');
+    }
+    if (err.message.includes('Sign in')) throw new Error('SIGNIN_REQUIRED');
     if (err.message.includes('Video unavailable')) throw new Error('VIDEO_UNAVAILABLE');
     if (err.message.includes('Private')) throw new Error('VIDEO_PRIVATE');
-    if (err.message.includes('copyright')) throw new Error('VIDEO_COPYRIGHT');
-    if (err.message.includes('429') || err.message.includes('Too Many Requests')) throw new Error('RATE_LIMITED');
     
     throw new Error('FETCH_FAILED');
   }
