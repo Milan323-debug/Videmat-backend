@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: vidmate-backend
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: bash scripts/setup.sh && npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false        # you fill this in Render dashboard
+      - key: YTDLP_PATH
+        value: yt-dlp
