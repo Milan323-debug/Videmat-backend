@@ -128,19 +128,15 @@ function estimateAudioSize(kbps, duration) {
 
 // ── Download video/audio to a file path, reporting progress ──
 function downloadToFile(url, format, outputPath, ext, onProgress) {
-  return new Promise(async (resolve, reject) => {
+  return new Promise((resolve, reject) => {
     try {
       console.log(`⬇  Starting download: ${outputPath}`);
       console.log(`   Format: ${format}`);
 
-      const stream = ytdl(url, { quality: format });
+      // format should be an itag (number) from buildDownloadOptions
+      const options = { quality: parseInt(format) || 'highest' };
+      const stream = ytdl(url, options);
       const file = fs.createWriteStream(outputPath);
-
-      let downloadedBytes = 0;
-
-      stream.on('data', (chunk) => {
-        downloadedBytes += chunk.length;
-      });
 
       stream.on('progress', (chunkLength, downloaded, total) => {
         const percent = (downloaded / total) * 100;
@@ -149,31 +145,36 @@ function downloadToFile(url, format, outputPath, ext, onProgress) {
 
       stream.on('error', (err) => {
         fs.unlink(outputPath, () => {});
-        reject(err);
+        reject(new Error(`Download failed: ${err.message}`));
       });
 
       file.on('error', (err) => {
         fs.unlink(outputPath, () => {});
-        reject(err);
+        reject(new Error(`File write failed: ${err.message}`));
       });
 
       stream.pipe(file);
 
-      file.on('finish', async () => {
+      file.on('finish', () => {
         if (ext === 'mp3') {
           // Convert to MP3 using ffmpeg
           const mp3Path = outputPath.replace('.mp4', '.mp3');
-          await convertToMp3(outputPath, mp3Path);
-          fs.unlink(outputPath, () => {}); // Remove original
-          console.log(`✅ Download complete: ${mp3Path}`);
-          resolve(mp3Path);
+          convertToMp3(outputPath, mp3Path)
+            .then(() => {
+              fs.unlink(outputPath, () => {}); // Remove original
+              console.log(`✅ Download complete: ${mp3Path}`);
+              resolve(mp3Path);
+            })
+            .catch((err) => {
+              reject(new Error(`MP3 conversion failed: ${err.message}`));
+            });
         } else {
           console.log(`✅ Download complete: ${outputPath}`);
           resolve(outputPath);
         }
       });
     } catch (err) {
-      reject(err);
+      reject(new Error(`Download error: ${err.message}`));
     }
   });
 }
